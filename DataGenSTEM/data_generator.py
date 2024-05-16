@@ -118,12 +118,12 @@ def get_pseudo_potential(xtal, pixel_size = 0.0725, sigma=0.2, axis_extent = Non
     return normalized_map.T
 
 
-def get_onehot_masks(xtal, pixel_size=0.1, radius=3, axis_extent=None):
-
+def get_masks(xtal, pixel_size=0.1, radius=3, axis_extent=None, mode='one_hot'):
     positions = xtal.get_positions()[:, :2]
-    atomic_numbers = xtal.get_atomic_numbers()  
+    atomic_numbers = xtal.get_atomic_numbers()
     _, inverse_indices = np.unique(atomic_numbers, return_inverse=True)
     atom_ids = inverse_indices + 1  # the background pixels will be labeled as 0
+    unique_atom_ids = np.unique(atom_ids)
 
     # Determine image size
     if axis_extent is not None:
@@ -134,35 +134,45 @@ def get_onehot_masks(xtal, pixel_size=0.1, radius=3, axis_extent=None):
     img_height = int((ymax - ymin) / pixel_size)
     img_width = int((xmax - xmin) / pixel_size)
 
-    # Define a function to create a mask for a single atom type
+    master_mask = np.zeros((len(unique_atom_ids), img_height, img_width), dtype=np.uint8)
+    
     def create_mask_for_atom(atom_id):
         mask = np.zeros((img_height, img_width), dtype=np.uint8)
         atom_mask = (atom_ids == atom_id)
         atom_positions = positions[atom_mask]
 
         # Make mask 1 in radius around each atom
-        for x, y in atom_positions: # adress problem with flipped mask images ?
+        for x, y in atom_positions:
             x_pixel = int((x - xmin) / pixel_size)
             y_pixel = int((y - ymin) / pixel_size)
             rr, cc = disk((y_pixel, x_pixel), radius, shape=mask.shape)
             mask[rr, cc] = 1
-        return mask
+        master_mask[atom_id - 1, mask == 1] = 1
 
     # Parallelize the mask creation
-    unique_atom_ids = np.unique(atom_ids)
-    masks = [da.from_delayed(dask.delayed(create_mask_for_atom)(atom_id), shape=(img_height, img_width), dtype=np.uint8)
-             for atom_id in unique_atom_ids]
+    tasks = [dask.delayed(create_mask_for_atom)(atom_id) for atom_id in unique_atom_ids]
+    dask.compute(*tasks)
 
-    # Compute all masks in parallel
-    masks = da.compute(*masks)
+    if mode.lower() == 'one_hot':
+        num_masks = unique_atom_ids.size + 1  # include background
+        background_mask = np.zeros((img_height, img_width), dtype=np.uint8)
+        background_mask[(np.sum(master_mask, axis=0) == 0)] = 1
+        masks = np.stack([background_mask] + [master_mask[i] for i in range(len(unique_atom_ids))], axis=0)
+        return masks
 
-    # Create the background mask and stack all masks
-    background_mask = np.zeros((img_height, img_width), dtype=np.uint8)
-    background_mask[(np.sum(masks, axis=0) == 0)] = 1
-    masks = [background_mask] + list(masks)
-    masks = np.stack(masks, axis=0)
+    elif mode.lower() == 'binary':
+        sum_masks = np.sum(master_mask, axis=0)
+        final_mask = np.where(sum_masks > 0, 1, 0)
+        return final_mask
 
-    return masks
+    elif mode.lower() == 'integer':
+        final_mask = np.zeros((img_height, img_width), dtype=np.uint8)
+        for i, mask in enumerate(master_mask):
+            final_mask[mask == 1] = i + 1
+        return final_mask
+
+    else:
+        raise ValueError("Invalid mode. Choose from 'one_hot', 'binary', or 'integer'")
 
 
 def get_point_spread_function(airy_disk_radius = 1, size = 32):
