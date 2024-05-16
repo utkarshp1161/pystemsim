@@ -11,7 +11,7 @@ from scipy.ndimage import zoom, gaussian_filter
 from skimage.draw import disk
 
 
-def get_imaging_xtal(xtal, n_cells = (1,1,1), rotation = 0, n_vacancies = 10, phonon_sigma = 0.01, axis_extent = None):
+def get_xtal_matrix(xtal, n_cells = (1,1,1), rotation = 0, n_vacancies = 10, phonon_sigma = 0.01, axis_extent = None):
     """
     Generates an imaging crystal structure by manipulating an ACE atoms object.
 
