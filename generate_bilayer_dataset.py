@@ -22,7 +22,7 @@ axis_extent = (xmin - borders, xmax + borders, ymin - borders, ymax + borders)
 n_images = 1000
 crop_size = 512
 pixel_size = 0.078125 # Angstrom/pixel, determines number of points, aka resolution of maps.  the xtal determines the fov
-n_crops = 10 # number of 512 crops per large image
+n_crops = 20 # number of crops per large image
 
 print('making images:')
 image_counter = 0
@@ -39,7 +39,7 @@ while image_counter < n_images:
 
     # Set random params
     # --------------------------------------------------
-    phonon_sigma = rng.uniform(0.05, 0.15)
+    phonon_sigma = rng.uniform(0.02, 0.1)
     rotation_l1 = rng.uniform(0, 360)
     rotation_l2 = rng.uniform(0, 360)
     atom_var = rng.normal(loc = 0.175, scale = 0.01)
@@ -70,12 +70,16 @@ while image_counter < n_images:
     masks_l1 = dg.get_masks(rot_xtal_l1, axis_extent = axis_extent, pixel_size = pixel_size, radius = 5, mode='one_hot')
     masks_l2 = dg.get_masks(rot_xtal_l2, axis_extent = axis_extent, pixel_size = pixel_size, radius = 5, mode='one_hot')
 
+    # Try only the atom masks (do not include the first, background mask)
+    masks_l1 = masks_l1[1:]
+    masks_l2 = masks_l2[1:]
+
     # Crop and zoom
-    batch_ims = dg.shotgun_crop(noisy_image, crop_size = 512, n_crops = n_crops, seed = crop_param_seed, magnification_var = magnification_var, roi = 'middle')
+    batch_ims = dg.shotgun_crop(noisy_image, crop_size = crop_size, n_crops = n_crops, seed = crop_param_seed, magnification_var = magnification_var, roi = 'middle')
     batch_ims = batch_ims.reshape(-1,crop_size,crop_size)
     
-    batch_masks_l1 = dg.shotgun_crop(masks_l1, crop_size = 512, n_crops = n_crops, seed = crop_param_seed, magnification_var = magnification_var, return_binary = True, roi = 'middle')
-    batch_masks_l2 = dg.shotgun_crop(masks_l2, crop_size = 512, n_crops = n_crops, seed = crop_param_seed, magnification_var = magnification_var, return_binary = True, roi = 'middle')
+    batch_masks_l1 = dg.shotgun_crop(masks_l1, crop_size = crop_size, n_crops = n_crops, seed = crop_param_seed, magnification_var = magnification_var, return_binary = True, roi = 'middle')
+    batch_masks_l2 = dg.shotgun_crop(masks_l2, crop_size = crop_size, n_crops = n_crops, seed = crop_param_seed, magnification_var = magnification_var, return_binary = True, roi = 'middle')
     batch_masks = np.stack((batch_masks_l1, batch_masks_l2), axis=1)
     batch_masks = batch_masks.reshape(-1,len(masks_l1)+len(masks_l2),crop_size,crop_size)
     batch_masks = (batch_masks > 0.5).astype(int) # binarize the masks
@@ -85,10 +89,11 @@ while image_counter < n_images:
         image = image - np.min(image)
         image = image / np.max(image)
         img = Image.fromarray((image * 255).astype(np.uint8))
-        img.save(f'/Users/austin/desktop/G_dataset/images/image_{image_counter:04d}.png')
+        img.save(f'/Users/austin/desktop/G_dataset_512/images/image_{image_counter:04d}.png')
 
-        os.mkdir(f'/Users/austin/desktop/G_dataset/labels/label_{image_counter:04d}/')
+        os.makedirs(f'/Users/austin/desktop/G_dataset_512/labels/label_{image_counter:04d}/', exist_ok=True)
         for j, label in enumerate(label_set):
             img = Image.fromarray((label * 255).astype(np.uint8))
-            img.save(f'/Users/austin/desktop/G_dataset/labels/label_{image_counter:04d}/class_{j:01d}.png')
+            img.save(f'/Users/austin/desktop/G_dataset_512/labels/label_{image_counter:04d}/class_{j:01d}.png')
+            
         image_counter += 1
