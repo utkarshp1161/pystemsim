@@ -19,9 +19,10 @@ borders = 1
 axis_extent = (xmin - borders, xmax + borders, ymin - borders, ymax + borders)
 
 # Generate training dataset
-n_images = 1000
-crop_size = 512
-pixel_size = 0.078125 # Angstrom/pixel, determines number of points, aka resolution of maps.  the xtal determines the fov
+n_images = 2000
+crop_size = 256
+
+pixel_size = 0.106 #0.078125 # Angstrom/pixel, determines number of points, aka resolution of maps.  the xtal determines the fov
 n_crops = 20 # number of crops per large image
 
 print('making images:')
@@ -89,11 +90,11 @@ while image_counter < n_images:
         image = image - np.min(image)
         image = image / np.max(image)
         img = Image.fromarray((image * 255).astype(np.uint8))
-        img.save(f'/Users/austin/desktop/G_dataset_512/images/image_{image_counter:04d}.png')
+        img.save(f'/Users/austin/desktop/G_256_b/images/image_{image_counter:04d}.png')
 
-        os.makedirs(f'/Users/austin/desktop/G_dataset_512/labels/label_{image_counter:04d}/', exist_ok=True)
+        os.makedirs(f'/Users/austin/desktop/G_256_b/labels/label_{image_counter:04d}/', exist_ok=True)
         for j, label in enumerate(label_set):
             img = Image.fromarray((label * 255).astype(np.uint8))
-            img.save(f'/Users/austin/desktop/G_dataset_512/labels/label_{image_counter:04d}/class_{j:01d}.png')
+            img.save(f'/Users/austin/desktop/G_256_b/labels/label_{image_counter:04d}/class_{j:01d}.png')
             
         image_counter += 1

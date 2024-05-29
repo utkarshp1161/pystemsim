@@ -5,10 +5,13 @@
 
 import dask
 import numpy as np
+import random
 import dask.array as da
 import scipy.special as sp
 from scipy.ndimage import zoom, gaussian_filter
 from skimage.draw import disk
+from ase import Atoms
+from ase.neighborlist import NeighborList
 
 
 def get_xtal_matrix(xtal, n_cells = (1,1,1), rotation = 0, n_vacancies = 10, phonon_sigma = 0.01, axis_extent = None):
@@ -71,6 +74,44 @@ def get_xtal_matrix(xtal, n_cells = (1,1,1), rotation = 0, n_vacancies = 10, pho
     
     return xtal
     
+
+def make_holes(atoms: Atoms, n_holes: int, hole_size: float) -> Atoms:
+    """
+    Create holes in an Atoms object by deleting atoms around randomly selected positions.
+
+    Parameters:
+    - atoms (ase.Atoms): The input Atoms object.
+    - n_holes (int): The number of holes to create.
+    - hole_size (float): The radius of each hole.
+
+    Returns:
+    - ase.Atoms: The modified Atoms object with holes.
+    """
+    # Step 1: Randomly select n_holes atoms
+    num_atoms = len(atoms)
+    selected_indices = random.sample(range(num_atoms), n_holes)
+
+    # Step 2: Find and delete atoms within radius hole_size
+    for index in selected_indices:
+        # Get the position of the selected atom
+        pos = atoms[index].position
+
+        # Create a NeighborList to find atoms within hole_size
+        cutoffs = [hole_size / 2] * len(atoms)
+        nl = NeighborList(cutoffs, self_interaction=False, bothways=True)
+        nl.update(atoms)
+
+        # Find atoms within hole_size around the selected atom
+        indices, offsets = nl.get_neighbors(index)
+        indices = indices.tolist()
+
+        # Add the selected atom itself to the list of atoms to be deleted
+        indices.append(index)
+
+        # Delete atoms by their indices
+        atoms = atoms[[atom.index for atom in atoms if atom.index not in indices]]
+
+    return atoms
 
 def get_pseudo_potential(xtal, pixel_size = 0.0725, sigma=0.2, axis_extent = None, type = 'Gaussian'):
     positions = xtal.get_positions()[:, :2]
