@@ -12,9 +12,10 @@ from scipy.ndimage import zoom, gaussian_filter
 from skimage.draw import disk
 from ase import Atoms
 from ase.neighborlist import NeighborList
+from scipy.fft import fft2, ifft2
 
 
-def get_xtal_matrix(xtal, n_cells = (1,1,1), rotation = 0, n_vacancies = 10, phonon_sigma = 0.01, axis_extent = None):
+def get_imaging_xtal(xtal, n_cells = (1,1,1), rotation = 0, n_vacancies = 10, phonon_sigma = 0.01, axis_extent = None):
     """
     Generates an imaging crystal structure by manipulating an ACE atoms object.
 
@@ -143,18 +144,29 @@ def get_pseudo_potential(xtal, pixel_size = 0.0725, sigma=0.2, axis_extent = Non
     # Gaussian kernel
     if type.lower() == 'gaussian':
         blurred_map = gaussian_filter(potential_map, sigma=1/sigma)
+        normalized_map = blurred_map / np.max(blurred_map)
 
     # Coulombic Individual Atomic Model (IAM): 1/r
-    if type.lower() == 'coulombic':
-        x = np.arange(-size//2 + 1, size//2 + 1)
-        y = np.arange(-size//2 + 1, size//2 + 1)
+    elif type.lower() == 'coulombic':
+        x = np.arange(-size[0] // 2 + 1, size[0] // 2 + 1)
+        y = np.arange(-size[1] // 2 + 1, size[1] // 2 + 1)
         xx, yy = np.meshgrid(x, y, sparse=True)
-        r = np.sqrt(xx**2 + yy**2) + epsilon  # Add epsilon to avoid division by zero
+        r = np.sqrt(xx ** 2 + yy ** 2) + epsilon  # Add epsilon to avoid division by zero
         kernel = 1 / r
 
-    # Electronic Shielding Effects
-
-    normalized_map = blurred_map / np.max(blurred_map)
+        # Zero-padding to avoid circular convolution issues
+        padded_potential_map = np.pad(potential_map, [(size[0]//2, size[0]//2), (size[1]//2, size[1]//2)], mode='constant')
+        padded_kernel = np.pad(kernel, [(padded_potential_map.shape[0] - kernel.shape[0],), (padded_potential_map.shape[1] - kernel.shape[1],)], mode='constant')
+        
+        # Perform FFT-based convolution
+        fft_potential_map = fft2(padded_potential_map)
+        fft_kernel = fft2(padded_kernel)
+        fft_result = fft_potential_map * fft_kernel
+        convolved_map = np.real(ifft2(fft_result))
+        
+        # Extract the region corresponding to the original potential_map size
+        blurred_map = convolved_map[size[0]//2:-size[0]//2, size[1]//2:-size[1]//2]
+        normalized_map = blurred_map / np.max(blurred_map)
 
     return normalized_map.T
 
