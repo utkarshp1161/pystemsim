@@ -114,7 +114,7 @@ def make_holes(atoms: Atoms, n_holes: int, hole_size: float) -> Atoms:
 
     return atoms
 
-def get_pseudo_potential(xtal, pixel_size = 0.0725, sigma=0.2, axis_extent = None, type = 'Gaussian'):
+def get_pseudo_potential(xtal, pixel_size = 0.0725, sigma=0.2, axis_extent = None, mode = 'Gaussian'):
     positions = xtal.get_positions()[:, :2]
 
     if axis_extent is not None:
@@ -142,21 +142,25 @@ def get_pseudo_potential(xtal, pixel_size = 0.0725, sigma=0.2, axis_extent = Non
     epsilon = 1e-9
 
     # Gaussian kernel
-    if type.lower() == 'gaussian':
+    if mode.lower() == 'gaussian':
         blurred_map = gaussian_filter(potential_map, sigma=1/sigma)
         normalized_map = blurred_map / np.max(blurred_map)
 
     # Coulombic Individual Atomic Model (IAM): 1/r
-    elif type.lower() == 'coulombic':
+    elif mode.lower() == 'coulombic':
         x = np.arange(-size[0] // 2 + 1, size[0] // 2 + 1)
         y = np.arange(-size[1] // 2 + 1, size[1] // 2 + 1)
         xx, yy = np.meshgrid(x, y, sparse=True)
         r = np.sqrt(xx ** 2 + yy ** 2) + epsilon  # Add epsilon to avoid division by zero
         kernel = 1 / r
 
-        # Zero-padding to avoid circular convolution issues
-        padded_potential_map = np.pad(potential_map, [(size[0]//2, size[0]//2), (size[1]//2, size[1]//2)], mode='constant')
-        padded_kernel = np.pad(kernel, [(padded_potential_map.shape[0] - kernel.shape[0],), (padded_potential_map.shape[1] - kernel.shape[1],)], mode='constant')
+        # Calculate the new size for zero-padding to avoid circular convolution issues
+        pad_x = potential_map.shape[0] + kernel.shape[0] - 1
+        pad_y = potential_map.shape[1] + kernel.shape[1] - 1
+
+        # Zero-padding to the same size
+        padded_potential_map = np.pad(potential_map, [(0, pad_x - potential_map.shape[0]), (0, pad_y - potential_map.shape[1])], mode='constant')
+        padded_kernel = np.pad(kernel, [(0, pad_x - kernel.shape[0]), (0, pad_y - kernel.shape[1])], mode='constant')
         
         # Perform FFT-based convolution
         fft_potential_map = fft2(padded_potential_map)
@@ -165,8 +169,10 @@ def get_pseudo_potential(xtal, pixel_size = 0.0725, sigma=0.2, axis_extent = Non
         convolved_map = np.real(ifft2(fft_result))
         
         # Extract the region corresponding to the original potential_map size
-        blurred_map = convolved_map[size[0]//2:-size[0]//2, size[1]//2:-size[1]//2]
+        blurred_map = convolved_map[:potential_map.shape[0], :potential_map.shape[1]]
         normalized_map = blurred_map / np.max(blurred_map)
+    else:
+        raise ValueError("Invalid mode. Choose from 'Gaussian' or 'Coulombic'")
 
     return normalized_map.T
 
