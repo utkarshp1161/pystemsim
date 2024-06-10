@@ -334,6 +334,37 @@ def add_poisson_noise(image, shot_noise=0.8):
     return noisy_image
 
 
+def add_lowfreq_noise(image, noise_level=0.1, freq_scale=0.1):
+    """
+    Adds low frequency noise to a numpy array.
+    
+    Parameters:
+    - image: numpy array, the input image.
+    - noise_level: float, the amplitude of the noise to be added.
+    - freq_scale: float, scaling factor for the frequency to control noise frequency content.
+    
+    Returns:
+    - noisy_image: numpy array, the image with added low frequency noise.
+    """
+    rows, cols = image.shape
+
+    noise = np.random.normal(0, noise_level, (rows, cols))
+    noise_fft = np.fft.fft2(noise)
+
+    # Create a frequency filter that emphasizes low frequencies
+    row_freqs = np.fft.fftfreq(rows)
+    col_freqs = np.fft.fftfreq(cols)
+    freq_filter = np.outer(np.exp(-np.square(row_freqs) / (2 * freq_scale**2)),
+                           np.exp(-np.square(col_freqs) / (2 * freq_scale**2)))
+
+    # Apply the frequency filter to the noise in the frequency domain
+    filtered_noise_fft = noise_fft * freq_filter
+    low_freq_noise = np.fft.ifft2(filtered_noise_fft).real
+    noisy_image = image + low_freq_noise
+
+    return noisy_image
+
+
 def grid_crop(image_master, crop_size=512, crop_glide=128):
     '''
     Slices an image into smaller, overlapping square crops.
