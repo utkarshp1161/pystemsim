@@ -435,7 +435,7 @@ def shotgun_crop(image, crop_size=512, magnification_var = None, n_crops=10, see
     crops = []
     for size in crop_sizes:
         if roi == 'middle':
-            edge_cutoff = 256
+            edge_cutoff = crop_size//4
             top = crop_rng.integers(edge_cutoff, h - size - edge_cutoff)
             left = crop_rng.integers(edge_cutoff, w - size - edge_cutoff)
         else:
