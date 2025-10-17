@@ -69,6 +69,7 @@ class SidpyDataset(Dataset):
 
     def __getitem__(self, idx):
         # Trigger computation for this sample
+        # est bitlength in inits
         image = self.images[idx].compute().astype('float32')
         labels = self.labels[idx].compute().astype('float32')
 

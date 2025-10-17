@@ -6,6 +6,7 @@
 import dask
 import numpy as np
 import random
+import sidpy
 import dask.array as da
 import scipy.special as sp
 from scipy.ndimage import zoom, gaussian_filter
@@ -13,68 +14,8 @@ from skimage.draw import disk
 from ase import Atoms
 from ase.neighborlist import NeighborList
 from scipy.fft import fft2, ifft2
+import pyTEMlib.probe_tools as pt
 
-
-def get_imaging_xtal(xtal, n_cells = (1,1,1), rotation = 0, n_vacancies = 10, phonon_sigma = 0.01, axis_extent = None):
-    """
-    Generates an imaging crystal structure by manipulating an ACE atoms object.
-
-    Parameters:
-    xtal (Atoms): An Atomic Simulation Environment (ASE) Atoms object representing the crystal structure.
-    n_cells (tuple of int, optional): A tuple (nx, ny, nz) defining the replication of the unit cell in each direction. Defaults to (1,1,1).
-    rotation (float, optional): The angle in degrees to rotate the crystal structure around the center of mass. Defaults to 0.
-    n_vacancies (int, optional): Number of vacancies to introduce in the crystal structure. Defaults to 10.
-    phonon_sigma (float, optional): Standard deviation for the positional noise to simulate thermal effects (phonons). Defaults to 0.01.
-    axis_extent (tuple of float, optional): A tuple (xmin, xmax, ymin, ymax) defining the axis extents to limit the positions of the atoms. If None, no cutting is performed. Defaults to None.
-
-    Returns:
-    Atoms: The modified ASE Atoms object representing the transformed crystal structure.
-    
-    This function performs several operations on the input crystal structure:
-    1. Replicates the unit cell.
-    2. Applies rotation around the center of mass.
-    3. Introduces thermal vibrations through rattling.
-    4. Optionally cuts atoms outside the specified imaging region.
-    5. Introduces vacancies.
-    """
-    xtal = xtal * n_cells
-    positions = xtal.get_positions()
-
-    # get atom index closest to COM
-    com = np.mean(positions, axis=0)
-    dists = np.linalg.norm(positions - com, axis=1)
-    com_atom = np.argmin(dists)
-
-    # rotate atoms around COM atom
-    theta = rotation * np.pi / 180 # deg to rad
-    rotation_matrix = np.array([[np.cos(theta), -np.sin(theta)],
-                                [np.sin(theta), np.cos(theta)]])
-    translated_coords = positions[:,:2] - np.array(positions[com_atom, :2])
-    rotated_atom_pos = np.dot(translated_coords, rotation_matrix)
-    rotated_atom_pos += np.array(positions[com_atom, :2])
-    new_positions = positions.copy()
-    new_positions[:,:2] = rotated_atom_pos
-    xtal.set_positions(new_positions)
-
-    # add positional noise with frozen phonons, normal distribution
-    xtal.rattle(stdev = phonon_sigma)
-    rattled_positions = xtal.get_positions()
-
-    # optionally: cut atoms outside the edge of the image region
-    if axis_extent is not None:
-        xmin, xmax, ymin, ymax = axis_extent        
-        ids_to_delete = np.where((rattled_positions[:,0] < xmin) | (rattled_positions[:,0] > xmax) | 
-                                 (rattled_positions[:,1] < ymin) | (rattled_positions[:,1] > ymax))[0]
-        del xtal[ids_to_delete]
-        
-    # remove vacancies
-    if n_vacancies > 0:
-        n_atoms = len(xtal.get_atomic_numbers())
-        vacancies = np.random.choice(n_atoms, n_vacancies, replace=False)
-        del xtal[vacancies]
-    
-    return xtal
-    
 
 def make_holes(atoms: Atoms, n_holes: int, hole_size: float) -> Atoms:
     """
@@ -114,67 +55,71 @@ def make_holes(atoms: Atoms, n_holes: int, hole_size: float) -> Atoms:
 
     return atoms
 
-def get_pseudo_potential(xtal, pixel_size = 0.0725, sigma=0.2, axis_extent = None, mode = 'Gaussian'):
-    positions = xtal.get_positions()[:, :2]
+def rotate_xtal(xtal, angle):
+    # pad for worst case and rotate
+    padded = xtal * (2, 2, 1)
+    padded.rotate('z', angle, 'com')
 
-    if axis_extent is not None:
-        xmin, xmax, ymin, ymax = axis_extent
-        x_coords = np.linspace(xmin, xmax, int((xmax - xmin) / pixel_size))
-        y_coords = np.linspace(ymin, ymax, int((ymax - ymin) / pixel_size))
-    else:
-        xmin, xmax = np.min(positions[:, 0]), np.max(positions[:, 0])
-        ymin, ymax = np.min(positions[:, 1]), np.max(positions[:, 1])
-        fov = max(xmax - xmin, ymax - ymin)
-        n_points = int(fov / pixel_size)
-        x_coords = np.linspace(xmin, xmax, n_points)
-        y_coords = np.linspace(ymin, ymax, n_points)
+    # crop to original cell
+    cell = xtal.cell
+    positions = padded.get_positions()[:, :2]
+    inv_cell = np.linalg.inv(cell[:2, :2])
+    frac = positions @ inv_cell - 0.5
+    mask = np.all((frac >= 0) & (frac < 1), axis=1)
+
+    # creat the new xtal object
+    xtal_cropped = padded[mask].copy()
+    xtal_cropped.set_cell(cell, scale_atoms=False)
+    xtal_cropped.set_scaled_positions(np.hstack([frac[mask], padded.get_scaled_positions()[mask, 2:3]]))
+
+    return xtal_cropped
+
+def sub_pix_gaussian(size=10, sigma=0.2, dx=0.0, dy=0.0):
+    # returns sub-pix shifted gaussian
+    coords = np.arange(size) - (size - 1) / 2.0
+    x, y = np.meshgrid(coords, coords)
+    g = np.exp(-(((x + dx) ** 2 + (y + dy) ** 2) / (2 * sigma**2)))
+    g /= g.max()
+    return g
+
+def create_pseudo_potential(xtal, pixel_size, sigma, bounds, atom_frame=11):
+    # Create empty image
+    x_min, x_max = bounds[0], bounds[1]
+    y_min, y_max = bounds[2], bounds[3]
+    pixels_x = int((x_max - x_min) / pixel_size)
+    pixels_y = int((y_max - y_min) / pixel_size)
+    potential_map = np.zeros((pixels_x, pixels_y))
+    padding = atom_frame  # to avoid edge effects
+    potential_map = np.pad(potential_map, padding, mode='constant', constant_values=0.0)
 
     # Map of atomic numbers - i.e. scattering intensity
-    atomic_numbers = xtal.get_atomic_numbers() 
-    potential_map = np.zeros((len(x_coords), len(y_coords)))
+    atomic_numbers = xtal.get_atomic_numbers()
+    positions = xtal.get_positions()[:, :2]
+
+    mask = ((positions[:, 0] >= x_min) & (positions[:, 0] < x_max) & (positions[:, 1] >= y_min) & (positions[:, 1] < y_max))
+    positions = positions[mask]
+    atomic_numbers = atomic_numbers[mask]
+
     for pos, atomic_number in zip(positions, atomic_numbers):
-        x_idx = np.searchsorted(x_coords, pos[0])
-        y_idx = np.searchsorted(y_coords, pos[1])
-        potential_map[x_idx, y_idx] += atomic_number
+        x,y = np.round(pos/pixel_size)
+        dx,dy = pos - np.round(pos)
+  
+        single_atom = sub_pix_gaussian(size=atom_frame, sigma=sigma, dx=dx, dy=dy) * atomic_number
+        potential_map[int(x+padding+dx-padding//2-1):int(x+padding+dx+padding//2),int(y+padding+dy-padding//2-1):int(y+padding+dy+padding//2)] += single_atom
+    potential_map = potential_map[padding:-padding, padding:-padding]
+    normalized_map = potential_map / np.max(potential_map)
 
-    # Define differrent cross section shapes
-    size = [10,10]
-    epsilon = 1e-9
+    # make a sidpy dataset
+    dset = sidpy.Dataset.from_array(normalized_map, name = 'Scattering Potential')
+    dset.data_type = 'image'
+    dset.units = 'A.U.'
+    dset.quantity = 'Scattering cross-section'
+    dset.set_dimension(0, sidpy.Dimension(pixel_size * np.arange(pixels_x),
+                        name='x', units='Å', quantity='Length',dimension_type='spatial'))
+    dset.set_dimension(1, sidpy.Dimension(pixel_size * np.arange(pixels_y),
+                        name='y', units='Å', quantity='Length',dimension_type='spatial'))
 
-    # Gaussian kernel
-    if mode.lower() == 'gaussian':
-        blurred_map = gaussian_filter(potential_map, sigma=1/sigma)
-        normalized_map = blurred_map / np.max(blurred_map)
-
-    # Coulombic Individual Atomic Model (IAM): 1/r
-    elif mode.lower() == 'coulombic':
-        x = np.arange(-size[0] // 2 + 1, size[0] // 2 + 1)
-        y = np.arange(-size[1] // 2 + 1, size[1] // 2 + 1)
-        xx, yy = np.meshgrid(x, y, sparse=True)
-        r = np.sqrt(xx ** 2 + yy ** 2) + epsilon  # Add epsilon to avoid division by zero
-        kernel = 1 / r
-
-        # Calculate the new size for zero-padding to avoid circular convolution issues
-        pad_x = potential_map.shape[0] + kernel.shape[0] - 1
-        pad_y = potential_map.shape[1] + kernel.shape[1] - 1
-
-        # Zero-padding to the same size
-        padded_potential_map = np.pad(potential_map, [(0, pad_x - potential_map.shape[0]), (0, pad_y - potential_map.shape[1])], mode='constant')
-        padded_kernel = np.pad(kernel, [(0, pad_x - kernel.shape[0]), (0, pad_y - kernel.shape[1])], mode='constant')
-        
-        # Perform FFT-based convolution
-        fft_potential_map = fft2(padded_potential_map)
-        fft_kernel = fft2(padded_kernel)
-        fft_result = fft_potential_map * fft_kernel
-        convolved_map = np.real(ifft2(fft_result))
-        
-        # Extract the region corresponding to the original potential_map size
-        blurred_map = convolved_map[:potential_map.shape[0], :potential_map.shape[1]]
-        normalized_map = blurred_map / np.max(blurred_map)
-    else:
-        raise ValueError("Invalid mode. Choose from 'Gaussian' or 'Coulombic'")
-
-    return normalized_map.T
+    return dset
 
 
 def get_masks(xtal, pixel_size=0.1, radius=3, axis_extent=None, mode='one_hot'):
@@ -234,133 +179,105 @@ def get_masks(xtal, pixel_size=0.1, radius=3, axis_extent=None, mode='one_hot'):
         raise ValueError("Invalid mode. Choose from 'one_hot', 'binary', or 'integer'")
 
 
-def get_point_spread_function(airy_disk_radius = 1, size = 32):
-    """
-    Generate a Point Spread Function (PSF) for a Transmission Electron Microscope (TEM)
-    using an Airy disk model.
-
-    Parameters:
-    - airy_disk_radius: Radius of the first Airy disk ring. This is a proxy for focus and aperture size.
-    - size: Determines the size of the generated PSF array (total array size will be 2*size + 1).
-
-    Returns:
-    - psf: 2D NumPy array representing the PSF.
-    """
-    
-    # Create grid
-    x = np.arange(-size, size + 1)
-    y = np.arange(-size, size + 1)
+def airy_disk(potential, resolution = 1.1):
+    # make grid
+    size_x = potential.shape[0]
+    size_y = potential.shape[1]
+    x = np.arange(size_x) - size_x//2 + 1
+    y = np.arange(size_y) - size_y//2 + 1
     xx, yy = np.meshgrid(x, y)
     rr = np.sqrt(xx**2 + yy**2)
 
+    pixel_size = potential.x.slope # Angstrom/pixel
+    
+    disk_radius = pixel_size / resolution * 2.5 # Airy disk radius in pixels
+    # not sure why this 2.5 belonggs in here, but it works
+
     # Calculate the Airy pattern (PSF)
     with np.errstate(divide='ignore', invalid='ignore'):
-        psf = (2 * sp.j1(airy_disk_radius * rr) / (airy_disk_radius * rr))**2
+        psf = (2 * sp.j1(disk_radius * rr) / (disk_radius * rr))**2
         psf[rr == 0] = 1  # Handling the division by zero at the center
 
     # Normalize the PSF
     psf /= np.sum(psf)
+    
+    dset = sidpy.Dataset.from_array(psf, name = 'Probe PSF')
+    dset.data_type = 'image'
+    dset.units = 'A.U.'
+    dset.quantity = 'Probability'
+    dset.set_dimension(0, sidpy.Dimension(pixel_size * np.arange(size_x),
+                        name='x', units='Å', quantity='Length',dimension_type='spatial'))
+    dset.set_dimension(1, sidpy.Dimension(pixel_size * np.arange(size_y),
+                        name='y', units='Å', quantity='Length',dimension_type='spatial'))
 
-    return psf
+    return dset
+
+def get_probe(ab, potential):
+    pixel_size = potential.x.slope # Angstrom/pixel
+    size_x, size_y = potential.shape
+
+    probe, A_k, chi  = pt.get_probe(ab, size_x, size_y,  scale = 'mrad', verbose= True)
+
+    dset = sidpy.Dataset.from_array(probe, name = 'Probe PSF')
+    dset.data_type = 'image'
+    dset.units = 'A.U.'
+    dset.quantity = 'Probability'
+    dset.set_dimension(0, sidpy.Dimension(pixel_size * np.arange(size_x),
+                        name='x', units='Å', quantity='Length',dimension_type='spatial'))
+    dset.set_dimension(1, sidpy.Dimension(pixel_size * np.arange(size_y),
+                        name='y', units='Å', quantity='Length',dimension_type='spatial'))
+
+    return dset
 
 
 def convolve_kernel(potential, psf):
-    """
-    Simulate a TEM image by convolving the potential with the PSF.
-    The potential and the PSF are first padded to compatible sizes.
+    # Convolve using FFT
+    psf_shifted = da.fft.ifftshift(psf)
+    image = da.fft.ifft2(da.fft.fft2(potential) * da.fft.fft2(psf_shifted))
+    image = da.absolute(image)
+    image = image - image.min()
+    image = image / image.max()
 
-    Parameters:
-    - potential: 2D NumPy array representing the potential.
-    - psf: 2D NumPy array representing the PSF.
+    size_x, size_y = potential.shape
+    pixel_size = potential.x.slope # Angstrom/pixel
 
-    Returns:
-    - image: 2D NumPy array representing the simulated TEM image.
-    """
+    dset = potential.like_data(image)
+    dset.units = 'A.U.'
+    dset.quantity = 'Intensity'
+    
+    return dset
 
-    # Sizes of the potential and the PSF
-    potential_size = np.array(potential.shape)
-    psf_size = np.array(psf.shape)
 
-    # Size for padding - the sum of sizes minus 1 (to account for overlap)
-    padded_size = potential_size + psf_size - 1
-
-    # Pad the potential and the PSF to the padded size
-    padded_potential = np.pad(potential, [(0, padded_size[0] - potential_size[0]), (0, padded_size[1] - potential_size[1])], mode='constant')
-    padded_psf = np.pad(psf, [(0, padded_size[0] - psf_size[0]), (0, padded_size[1] - psf_size[1])], mode='constant')
-
-    # Convolve the padded potential with the padded PSF using Fourier transform
-    image = np.fft.ifft2(np.fft.fft2(padded_potential) * np.fft.fft2(padded_psf))
-
+def poisson_noise(image, counts = 10e8):
     # Normalize the image
-    image = np.abs(image)
-    image /= np.max(image)
+    image = image - image.min()
+    image = image / image.sum()
+    noisy_image = np.random.poisson(image * counts)
 
-    # Determine the cropping indices to extract the central part of the convolved image
-    start_x = (padded_size[0] - potential_size[0]) // 2
-    end_x = start_x + potential_size[0]
-    start_y = (padded_size[1] - potential_size[1]) // 2
-    end_y = start_y + potential_size[1]
-
-    # Crop the image back to the original potential size
-    image = image[start_x:end_x, start_y:end_y]
-
-    return image
-
-
-def add_poisson_noise(image, shot_noise=0.8):
-    """
-    Add Poisson noise to an image based on a sampling parameter.
-
-    Parameters:
-    - image: A 2D NumPy array representing the image.
-    - shot_noise: A float representing the sampling parameter. A higher value results in more noise. 0 - 1
-
-    Returns:
-    - noisy_image: Image with Poisson noise added.
-    """
-
-    # Normalize the image
-    image_normalized = image / np.max(image)
-
-    # Adjust the scale of the noise
-    noise = np.power(10, 10 * (1-shot_noise))
-
-    # Generate Poisson noise
-    noisy_image = np.random.poisson(image_normalized * noise)
-
-    # Rescale to original range
-    noisy_image = (noisy_image / np.max(noisy_image)) * np.max(image)
+    noisy_image = noisy_image - noisy_image.min()
+    noisy_image = noisy_image / noisy_image.max()
+    noisy_image = image.like_data(noisy_image)
 
     return noisy_image
 
 
-def add_lowfreq_noise(image, noise_level=0.1, freq_scale=0.1):
-    """
-    Adds low frequency noise to a numpy array.
-    
-    Parameters:
-    - image: numpy array, the input image.
-    - noise_level: float, the amplitude of the noise to be added.
-    - freq_scale: float, scaling factor for the frequency to control noise frequency content.
-    
-    Returns:
-    - noisy_image: numpy array, the image with added low frequency noise.
-    """
-    rows, cols = image.shape
+def lowfreq_noise(image, noise_level=0.1, freq_scale=0.1):
+    size_x, size_y = image.shape
 
-    noise = np.random.normal(0, noise_level, (rows, cols))
+    noise = np.random.normal(0, noise_level, (size_x, size_y))
     noise_fft = np.fft.fft2(noise)
 
     # Create a frequency filter that emphasizes low frequencies
-    row_freqs = np.fft.fftfreq(rows)
-    col_freqs = np.fft.fftfreq(cols)
-    freq_filter = np.outer(np.exp(-np.square(row_freqs) / (2 * freq_scale**2)),
-                           np.exp(-np.square(col_freqs) / (2 * freq_scale**2)))
+    x_freqs = np.fft.fftfreq(size_x)
+    y_freqs = np.fft.fftfreq(size_y)
+    freq_filter = np.outer(np.exp(-np.square(x_freqs) / (2 * freq_scale**2)),
+                           np.exp(-np.square(y_freqs) / (2 * freq_scale**2)))
 
     # Apply the frequency filter to the noise in the frequency domain
     filtered_noise_fft = noise_fft * freq_filter
     low_freq_noise = np.fft.ifft2(filtered_noise_fft).real
     noisy_image = image + low_freq_noise
+    noisy_image = image.like_data(noisy_image)
 
     return noisy_image
 
